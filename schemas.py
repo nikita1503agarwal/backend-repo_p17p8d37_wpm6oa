@@ -1,48 +1,80 @@
 """
-Database Schemas
+Database Schemas for SEYA
 
-Define your MongoDB collection schemas here using Pydantic models.
-These schemas are used for data validation in your application.
-
-Each Pydantic model represents a collection in your database.
-Model name is converted to lowercase for the collection name:
-- User -> "user" collection
-- Product -> "product" collection
-- BlogPost -> "blogs" collection
+Each Pydantic model maps to a MongoDB collection (lowercased class name).
+These are used by the helper database layer and for validation in API routes.
 """
+from typing import List, Optional, Literal
+from pydantic import BaseModel, Field, EmailStr
 
-from pydantic import BaseModel, Field
-from typing import Optional
-
-# Example schemas (replace with your own):
-
+# Users / Customers
 class User(BaseModel):
-    """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
-    """
     name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
+    email: EmailStr = Field(..., description="Email address")
+    password_hash: str = Field(..., description="Hashed password")
+    role: Literal["customer", "admin"] = Field("customer")
+    phone: Optional[str] = None
+    addresses: Optional[List[dict]] = Field(
+        default=None,
+        description="List of addresses (label, line1, line2, city, zip, country)"
+    )
+    is_active: bool = True
+
+# Product variants (size, color, etc.)
+class Variant(BaseModel):
+    sku: str
+    size: Optional[str] = None
+    color: Optional[str] = None
+    stock: int = Field(ge=0, default=0)
+    price: Optional[float] = Field(default=None, ge=0, description="Override price")
 
 class Product(BaseModel):
-    """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
-    """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
+    title: str
+    description: Optional[str] = None
+    price: float = Field(..., ge=0)
+    category: Literal["Hoodies", "Tees", "Pantalons", "Accessoires"]
+    images: List[str] = Field(default_factory=list)
+    tags: List[str] = Field(default_factory=list)
+    variants: List[Variant] = Field(default_factory=list)
+    active: bool = True
 
-# Add your own schemas here:
-# --------------------------------------------------
+# Orders
+class OrderItem(BaseModel):
+    product_id: str
+    title: str
+    quantity: int = Field(..., ge=1)
+    unit_price: float = Field(..., ge=0)
+    variant: Optional[dict] = None
 
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class Order(BaseModel):
+    user_email: Optional[EmailStr] = None
+    items: List[OrderItem]
+    currency: Literal["eur", "usd"] = "eur"
+    subtotal: float = Field(..., ge=0)
+    total: float = Field(..., ge=0)
+    status: Literal["pending", "paid", "failed", "refunded"] = "pending"
+    stripe_session_id: Optional[str] = None
+
+# Blog/Actu posts
+class BlogPost(BaseModel):
+    title: str
+    slug: str
+    content: str
+    category: Literal["drops", "collabs", "conseils"] = "drops"
+    cover_image: Optional[str] = None
+    published: bool = True
+
+# Contact messages
+class Message(BaseModel):
+    name: str
+    email: EmailStr
+    subject: str
+    message: str
+    source: Literal["contact", "newsletter"] = "contact"
+
+# Promo codes (for future admin)
+class PromoCode(BaseModel):
+    code: str
+    type: Literal["percentage", "fixed"] = "percentage"
+    value: float = Field(..., gt=0)
+    active: bool = True
