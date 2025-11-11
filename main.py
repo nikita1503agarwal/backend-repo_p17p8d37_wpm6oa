@@ -4,10 +4,11 @@ from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from bson import ObjectId
+import requests
 
 from database import db, create_document, get_documents
 
-app = FastAPI(title="SEYA API", version="0.1.0")
+app = FastAPI(title="SEYA API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -211,5 +212,115 @@ def create_checkout_session(payload: CheckoutIn):
             cancel_url=payload.cancel_url,
         )
         return {"id": session.id, "url": session.url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# PayPal Checkout (Orders v2)
+class PaypalCheckoutIn(BaseModel):
+    items: List[CartItem]
+    currency: str = "EUR"
+    return_url: str
+    cancel_url: str
+
+
+def _paypal_base_url() -> str:
+    env = (os.getenv("PAYPAL_ENV") or "sandbox").lower()
+    return "https://api-m.paypal.com" if env == "live" else "https://api-m.sandbox.paypal.com"
+
+
+def _paypal_get_access_token() -> str:
+    cid = os.getenv("PAYPAL_CLIENT_ID")
+    secret = os.getenv("PAYPAL_CLIENT_SECRET")
+    if not cid or not secret:
+        raise HTTPException(status_code=400, detail="PayPal not configured")
+    url = f"{_paypal_base_url()}/v1/oauth2/token"
+    try:
+        resp = requests.post(
+            url,
+            headers={"Accept": "application/json", "Accept-Language": "en_US"},
+            auth=(cid, secret),
+            data={"grant_type": "client_credentials"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"PayPal auth error: {resp.text[:200]}")
+        return resp.json().get("access_token")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _paypal_amounts(items: List[CartItem], currency: str):
+    total = sum(i.quantity * i.unit_price for i in items)
+    # PayPal expects string amounts with two decimals
+    return {
+        "currency_code": currency.upper(),
+        "value": f"{total:.2f}",
+    }
+
+
+@app.post("/api/paypal/create-order")
+def paypal_create_order(payload: PaypalCheckoutIn):
+    token = _paypal_get_access_token()
+    url = f"{_paypal_base_url()}/v2/checkout/orders"
+    amount = _paypal_amounts(payload.items, payload.currency)
+
+    order_body = {
+        "intent": "CAPTURE",
+        "purchase_units": [
+            {
+                "amount": amount,
+            }
+        ],
+        "application_context": {
+            "return_url": payload.return_url,
+            "cancel_url": payload.cancel_url,
+            "shipping_preference": "NO_SHIPPING",
+            "user_action": "PAY_NOW",
+            "brand_name": "SEYA",
+        },
+    }
+
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+            json=order_body,
+            timeout=25,
+        )
+        if resp.status_code not in (201, 200):
+            raise HTTPException(status_code=502, detail=f"PayPal create error: {resp.text[:300]}")
+        data = resp.json()
+        approve = next((l.get("href") for l in data.get("links", []) if l.get("rel") == "approve"), None)
+        return {"id": data.get("id"), "status": data.get("status"), "approve_url": approve}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/paypal/capture/{order_id}")
+def paypal_capture_order(order_id: str):
+    token = _paypal_get_access_token()
+    url = f"{_paypal_base_url()}/v2/checkout/orders/{order_id}/capture"
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+            timeout=25,
+        )
+        if resp.status_code not in (201, 200):
+            raise HTTPException(status_code=502, detail=f"PayPal capture error: {resp.text[:300]}")
+        return resp.json()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
